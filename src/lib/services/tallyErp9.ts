@@ -1,8 +1,9 @@
 import { timingSafeEqual } from 'node:crypto';
 import { and, asc, eq, lt, or, sql } from 'drizzle-orm';
+import { ApiError } from '@/lib/api';
 import { db } from '@/lib/db';
 import { integrations, integrationSyncRecords } from '@/lib/db/schema';
-import { decryptSecret, looksEncrypted } from '@/lib/secrets';
+import { decryptSecret, looksEncrypted, SecretConfigError } from '@/lib/secrets';
 import type { Customer, Booking, Payment } from '@/lib/db/schema';
 
 export interface TallyErp9Config {
@@ -12,6 +13,20 @@ export interface TallyErp9Config {
   salesLedger: string;
   receiptLedger: string;
   creditLedger: string;
+}
+
+export function throwTallyStorageError(error: unknown): never {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  if (code === '42P01') {
+    throw new ApiError(
+      503,
+      'Tally integration database tables are missing. Apply migration 0011_tally_external_integration, then retry.',
+      'MIGRATION_REQUIRED',
+    );
+  }
+  throw error;
 }
 
 function escapeXml(value: unknown): string {
@@ -48,7 +63,18 @@ export async function getTallyErp9Config(): Promise<TallyErp9Config | null> {
   let agentToken: string | null = null;
   const storedToken = config.agentToken ?? config.relaySecret;
   if (typeof storedToken === 'string' && looksEncrypted(storedToken)) {
-    agentToken = decryptSecret(storedToken);
+    try {
+      agentToken = decryptSecret(storedToken);
+    } catch (error) {
+      if (error instanceof SecretConfigError) {
+        throw new ApiError(
+          503,
+          'The stored Tally agent token cannot be decrypted. Verify SETTINGS_ENCRYPTION_KEY matches the key used when it was saved.',
+          'ENCRYPTION_CONFIG',
+        );
+      }
+      throw error;
+    }
   } else if (typeof storedToken === 'string') {
     agentToken = storedToken;
   } else if (process.env.TALLYERP9_AGENT_TOKEN?.trim()) {
@@ -69,9 +95,14 @@ export async function testTallyErp9Connection(): Promise<{ ok: boolean; detail: 
   if (!config) return { ok: false, detail: 'Tally ERP 9 is not active or configured' };
   if (!config.companyName) return { ok: false, detail: 'Tally ERP 9 company name is required' };
   if (!config.agentToken) return { ok: false, detail: 'Windows agent token is not configured' };
-  const row = await db.query.integrationSyncRecords.findFirst({
-    where: and(eq(integrationSyncRecords.provider, 'tallyerp9'), eq(integrationSyncRecords.entityType, 'agent')),
-  });
+  let row;
+  try {
+    row = await db.query.integrationSyncRecords.findFirst({
+      where: and(eq(integrationSyncRecords.provider, 'tallyerp9'), eq(integrationSyncRecords.entityType, 'agent')),
+    });
+  } catch (error) {
+    throwTallyStorageError(error);
+  }
   if (!row || row.status !== 'SYNCED' || Date.now() - row.updatedAt.getTime() > 120_000) {
     return { ok: false, detail: 'Windows agent is offline or has not confirmed the Tally connection recently' };
   }

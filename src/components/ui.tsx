@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { MoreHorizontal, X } from 'lucide-react';
 
 export function cn(...parts: Array<string | false | null | undefined>) {
@@ -179,6 +179,7 @@ export function Pagination({ page, total, pageSize, onChange }: { page: number; 
 
 export function Dialog({ open, title, onClose, children, footer }: { open: boolean; title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode }) {
   const [show, setShow] = useState(open);
+  const titleId = useId();
   useEffect(() => {
     if (open) setTimeout(() => setShow(true), 10);
     else setShow(false);
@@ -187,10 +188,15 @@ export function Dialog({ open, title, onClose, children, footer }: { open: boole
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-ink/40 backdrop-blur-sm" onClick={onClose} />
-      <div className={cn('relative z-10 w-full max-w-lg rounded-3xl bg-canvas p-6 shadow-pop transition-all', show ? 'animate-pop-in' : 'opacity-0')}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className={cn('relative z-10 w-full max-w-lg rounded-3xl bg-canvas p-6 shadow-pop transition-all', show ? 'animate-pop-in' : 'opacity-0')}
+      >
         <div className="mb-5 flex items-center justify-between">
-          <h3 className="text-lg font-bold text-ink">{title}</h3>
-          <button className="chip-clay !rounded-full !p-2" onClick={onClose} aria-label="Close">
+          <h3 id={titleId} className="text-lg font-bold text-ink">{title}</h3>
+          <button type="button" className="chip-clay !rounded-full !p-2" onClick={onClose} aria-label="Close">
             <X size={18} />
           </button>
         </div>

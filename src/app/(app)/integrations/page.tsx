@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Button, Card, PageHeader, Badge } from '@/components/ui';
+import { Button, Card, PageHeader, Badge, Dialog, Field, Input, Spinner } from '@/components/ui';
 import { fetcher } from '@/lib/fetcher';
 
 /**
@@ -95,7 +95,8 @@ export default function IntegrationsPage() {
       />
       <p className="mb-4 text-sm text-ink-muted">
         These channels are implemented, not hypothetical. Each one needs operator-supplied
-        credentials before it sends or receives anything &mdash; enter them at{' '}
+        credentials before it sends or receives anything. Configure Tally below; enter other
+        provider credentials at{' '}
         <a href="/settings/keys" className="font-semibold text-primary-700 underline">
           Settings &rsaquo; API Keys
         </a>
@@ -108,7 +109,7 @@ export default function IntegrationsPage() {
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h3 className="font-semibold text-ink">{i.name}</h3>
-                  <Badge tone={TONE[i.status]}>{i.status}</Badge>
+                  {i.name !== 'Tally ERP 9' && <Badge tone={TONE[i.status]}>{i.status}</Badge>}
                 </div>
                 <p className="mt-1 text-sm text-ink-muted">{i.desc}</p>
                 {i.detail && <p className="mt-2 text-xs leading-relaxed text-ink-faint">{i.detail}</p>}
@@ -127,6 +128,7 @@ interface TallyStatus {
   configured: boolean;
   companyName: string | null;
   release: string | null;
+  connection: TallyCheck;
 }
 
 interface TallyCheck {
@@ -139,6 +141,7 @@ function TallyStatusPanel() {
   const [check, setCheck] = useState<TallyCheck | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [configureOpen, setConfigureOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -156,13 +159,14 @@ function TallyStatusPanel() {
   const checkConnection = async () => {
     setLoading(true);
     setError(null);
+    setCheck(null);
     try {
       setCheck(await fetcher<TallyCheck>('/api/integrations/tallyerp9/test', { method: 'POST', body: '{}' }));
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not check Tally connection');
     } finally {
       setLoading(false);
-      await refresh();
     }
   };
 
@@ -175,16 +179,198 @@ function TallyStatusPanel() {
             {status?.companyName ? ` · ${status.companyName}` : ''}
           </p>
           <p>
-            Windows agent: <strong>{check?.ok ? 'connected' : 'not confirmed'}</strong>
+            Windows agent: <strong>{(check ?? status?.connection)?.ok ? 'connected' : 'not confirmed'}</strong>
             {status?.release ? ` · Tally release ${status.release}` : ''}
           </p>
-          {check && <p className={check.ok ? 'mt-1 text-emerald-700' : 'mt-1 text-amber-700'}>{check.detail}</p>}
+          {(check ?? status?.connection) && (
+            <p className={(check ?? status?.connection)?.ok ? 'mt-1 text-emerald-700' : 'mt-1 text-amber-700'}>
+              {(check ?? status?.connection)?.detail}
+            </p>
+          )}
           {error && <p className="mt-1 text-rose-700" role="alert">{error}</p>}
         </div>
-        <Button type="button" variant="secondary" loading={loading} onClick={() => void checkConnection()}>
-          Check connection
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="secondary" onClick={() => setConfigureOpen(true)}>
+            Configure
+          </Button>
+          <Button type="button" variant="secondary" loading={loading} onClick={() => void checkConnection()}>
+            Check connection
+          </Button>
+        </div>
       </div>
+      <TallyConfigurationDialog
+        open={configureOpen}
+        onClose={() => setConfigureOpen(false)}
+        onSaved={async () => {
+          setCheck(null);
+          await refresh();
+        }}
+      />
     </div>
+  );
+}
+
+interface TallySettingsResponse {
+  encryptionConfigured: boolean;
+  items: Array<{
+    provider: string;
+    plain: Record<string, string | null>;
+    secrets: Array<{ key: string; hasStoredKey: boolean }>;
+  }>;
+}
+
+function TallyConfigurationDialog({
+  open,
+  onClose,
+  onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [encryptionConfigured, setEncryptionConfigured] = useState(false);
+  const [hasStoredToken, setHasStoredToken] = useState(false);
+  const [crmUrl, setCrmUrl] = useState('');
+  const [companyName, setCompanyName] = useState('');
+  const [release, setRelease] = useState('');
+  const [agentToken, setAgentToken] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setLoading(true);
+    setError(null);
+    setSaved(false);
+    setEncryptionConfigured(false);
+    setHasStoredToken(false);
+    setCompanyName('');
+    setRelease('');
+    setAgentToken('');
+    setCrmUrl(window.location.origin);
+    fetcher<TallySettingsResponse>('/api/settings/keys')
+      .then((response) => {
+        const tally = response.items.find((item) => item.provider === 'tallyerp9');
+        if (!tally) throw new Error('Tally ERP 9 settings were not returned by the server');
+        if (!active) return;
+        setEncryptionConfigured(response.encryptionConfigured);
+        setHasStoredToken(Boolean(tally.secrets.find((secret) => secret.key === 'agentToken')?.hasStoredKey));
+        setCompanyName(tally.plain.companyName ?? '');
+        setRelease(tally.plain.release ?? '');
+        setAgentToken('');
+      })
+      .catch((err) => {
+        if (active) setError(err instanceof Error ? err.message : 'Could not load Tally configuration');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open]);
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+    setSaved(false);
+    if (!companyName.trim()) {
+      setError('Tally company name is required');
+      return;
+    }
+    if (!hasStoredToken && agentToken.trim().length < 32) {
+      setError('Enter an agent token of at least 32 characters');
+      return;
+    }
+    if (agentToken.trim() && agentToken.trim().length < 32) {
+      setError('A replacement agent token must be at least 32 characters');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const body: Record<string, string> = {
+        provider: 'tallyerp9',
+        companyName: companyName.trim(),
+        release: release.trim(),
+      };
+      if (agentToken.trim()) body.agentToken = agentToken.trim();
+      await fetcher('/api/settings/keys', { method: 'PUT', body: JSON.stringify(body) });
+      setAgentToken('');
+      setHasStoredToken(true);
+      setSaved(true);
+      await onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save Tally configuration');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="Configure Tally ERP 9"
+      footer={
+        <>
+          <Button type="button" variant="secondary" onClick={onClose}>Close</Button>
+          <Button type="submit" form="tally-erp9-config-form" loading={saving} disabled={loading || !encryptionConfigured}>
+            Save configuration
+          </Button>
+        </>
+      }
+    >
+      {loading ? (
+        <div className="flex justify-center py-8"><Spinner /></div>
+      ) : (
+        <form id="tally-erp9-config-form" onSubmit={(event) => void submit(event)} className="space-y-4">
+          <Field label="Cloud CRM URL" hint="Set this as TALLY_CRM_URL for the Windows agent.">
+            <Input value={crmUrl} readOnly aria-readonly="true" className="font-mono" />
+          </Field>
+          <Field label="Tally company name" hint="Must exactly match the company name shown by Tally ERP 9.">
+            <Input value={companyName} onChange={(event) => setCompanyName(event.target.value)} required autoComplete="organization" />
+          </Field>
+          <Field label="Tally ERP 9 release" hint="Optional; enter only after confirming it in Tally Help > About.">
+            <Input value={release} onChange={(event) => setRelease(event.target.value)} maxLength={40} />
+          </Field>
+          <Field
+            label="Windows agent token"
+            hint={hasStoredToken
+              ? 'Saved securely and hidden. Leave blank to keep it, or enter a new 32+ character token to rotate it.'
+              : 'Use a random token of at least 32 characters. Copy it for the Windows agent before saving; the CRM will not show it again.'}
+          >
+            <Input
+              type="password"
+              value={agentToken}
+              onChange={(event) => setAgentToken(event.target.value)}
+              placeholder={hasStoredToken ? 'Saved — hidden' : 'Enter a new token'}
+              autoComplete="new-password"
+              spellCheck={false}
+              className="font-mono"
+              required={!hasStoredToken}
+            />
+          </Field>
+          <div className="rounded-xl bg-surface px-3 py-2 text-xs text-ink-muted">
+            <p><strong>Windows agent settings</strong></p>
+            <p className="mt-1">TALLY_CRM_URL: <code>{crmUrl}</code></p>
+            <p className="mt-1">TALLY_HTTP_URL: <code>http://127.0.0.1:9000</code> (localhost only)</p>
+            <p>TALLY_COMPANY: the exact company name above</p>
+            <p>TALLY_AGENT_POLL_MS: 5000 by default</p>
+            <p className="mt-1">Never expose Tally&apos;s HTTP/XML port to the public internet.</p>
+          </div>
+          {!encryptionConfigured && (
+            <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">
+              Secret storage is unavailable. The administrator must configure SETTINGS_ENCRYPTION_KEY before saving.
+            </p>
+          )}
+          {error && <p className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{error}</p>}
+          {saved && <p className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800" role="status">Configuration saved. The token is hidden; set TALLYERP9_AGENT_TOKEN on the Windows agent to the same value.</p>}
+        </form>
+      )}
+    </Dialog>
   );
 }

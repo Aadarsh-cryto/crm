@@ -1,5 +1,5 @@
 import { eq, inArray } from 'drizzle-orm';
-import { ApiError, readJson, requirePermission } from '@/lib/api';
+import { ApiError, hasPermission, readJson, requirePermission } from '@/lib/api';
 import { writeAudit } from '@/lib/audit';
 import { db } from '@/lib/db';
 import { integrations } from '@/lib/db/schema';
@@ -142,6 +142,10 @@ function maskOf(stored: unknown): string | null {
   }
 }
 
+function canManageProvider(actor: { user: Parameters<typeof hasPermission>[0] }, provider: ProviderName): void {
+  requirePermission(actor.user, provider === 'tallyerp9' ? 'integrations.manage' : 'settings.manage');
+}
+
 function envPresence(spec: ProviderSpec): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const secret of spec.secrets) {
@@ -151,15 +155,18 @@ function envPresence(spec: ProviderSpec): Record<string, boolean> {
 }
 
 export const GET = withApi(async (actor) => {
-  requirePermission(actor.user, 'settings.manage');
+  if (!hasPermission(actor.user, 'settings.manage')) {
+    requirePermission(actor.user, 'integrations.manage');
+  }
 
-  const rows = await db.select().from(integrations).where(inArray(integrations.provider, [...PROVIDERS]));
+  const visibleProviders = hasPermission(actor.user, 'settings.manage') ? PROVIDERS : ['tallyerp9' as const];
+  const rows = await db.select().from(integrations).where(inArray(integrations.provider, [...visibleProviders]));
   const byProvider = new Map(rows.map((r) => [r.provider, r]));
 
   return {
     encryptionConfigured: isSecretEncryptionConfigured(),
     leadSources: LEAD_SOURCES,
-    items: PROVIDERS.map((provider) => {
+    items: visibleProviders.map((provider) => {
       const spec = PROVIDER_SPECS[provider];
       const row = byProvider.get(provider);
       const config = (row?.config ?? {}) as Record<string, unknown>;
@@ -172,7 +179,9 @@ export const GET = withApi(async (actor) => {
           label: secret.label,
           required: secret.required,
           hasStoredKey: Boolean(stored),
-          keyMask: maskOf(stored),
+          keyMask: provider === 'tallyerp9' && secret.key === 'agentToken'
+            ? (stored ? 'set (hidden)' : null)
+            : maskOf(stored),
           source: stored ? ('database' as const) : env[secret.key] ? ('environment' as const) : ('none' as const),
         };
       });
@@ -198,11 +207,6 @@ export const GET = withApi(async (actor) => {
 });
 
 export const PUT = withApi(async (actor, req) => {
-  requirePermission(actor.user, 'settings.manage');
-  if (!isSecretEncryptionConfigured()) {
-    throw new ApiError(503, 'Secret storage is not configured. Set SETTINGS_ENCRYPTION_KEY first.', 'CONFIG');
-  }
-
   const body = (await readJson(req)) as {
     provider?: unknown;
     isActive?: unknown;
@@ -210,6 +214,10 @@ export const PUT = withApi(async (actor, req) => {
     [key: string]: unknown;
   };
   const provider = assertProvider(body.provider);
+  canManageProvider(actor, provider);
+  if (!isSecretEncryptionConfigured()) {
+    throw new ApiError(503, 'Secret storage is not configured. Set SETTINGS_ENCRYPTION_KEY first.', 'CONFIG');
+  }
   const spec = PROVIDER_SPECS[provider];
 
   const existing = await db.query.integrations.findFirst({ where: eq(integrations.provider, provider) });
@@ -222,6 +230,9 @@ export const PUT = withApi(async (actor, req) => {
     if (typeof value !== 'string') {
       throw new ApiError(422, `${secret.label} must be a string`, 'VALIDATION');
     }
+    if (provider === 'tallyerp9' && secret.key === 'agentToken' && value.trim() && value.trim().length < 32) {
+      throw new ApiError(422, 'Windows agent token must be at least 32 characters', 'VALIDATION');
+    }
     if (!value.trim()) delete config[secret.key];
     else config[secret.key] = encryptSecret(value.trim());
   }
@@ -229,7 +240,24 @@ export const PUT = withApi(async (actor, req) => {
   for (const field of spec.plain) {
     if (body[field.key] === undefined) continue;
     const value = body[field.key];
+    if (provider === 'tallyerp9' && typeof value !== 'string') {
+      throw new ApiError(422, `${field.label} must be a string`, 'VALIDATION');
+    }
     config[field.key] = typeof value === 'string' ? value.trim() : '';
+  }
+
+  if (provider === 'tallyerp9') {
+    const companyName = config.companyName;
+    const release = config.release;
+    if (typeof companyName !== 'string' || !companyName.trim()) {
+      throw new ApiError(422, 'Tally ERP 9 company name is required', 'VALIDATION');
+    }
+    if (companyName.length > 160) {
+      throw new ApiError(422, 'Tally ERP 9 company name must be 160 characters or fewer', 'VALIDATION');
+    }
+    if (typeof release === 'string' && release.length > 40) {
+      throw new ApiError(422, 'Tally ERP 9 release must be 40 characters or fewer', 'VALIDATION');
+    }
   }
 
   if (provider === 'meta' && body.formSources !== undefined) {
@@ -287,9 +315,9 @@ export const PUT = withApi(async (actor, req) => {
 });
 
 export const DELETE = withApi(async (actor, req) => {
-  requirePermission(actor.user, 'settings.manage');
   const body = (await readJson(req)) as { provider?: unknown; key?: unknown };
   const provider = assertProvider(body.provider);
+  canManageProvider(actor, provider);
   const spec = PROVIDER_SPECS[provider];
 
   const existing = await db.query.integrations.findFirst({ where: eq(integrations.provider, provider) });

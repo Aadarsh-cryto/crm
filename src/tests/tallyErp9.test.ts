@@ -1,9 +1,21 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const tallyDb = vi.hoisted(() => ({
+  query: {
+    integrations: { findFirst: vi.fn() },
+    integrationSyncRecords: { findFirst: vi.fn() },
+  },
+}));
+
+vi.mock('@/lib/db', () => ({ db: tallyDb }));
+
 import {
   buildPartyLedgerXml,
   buildReceiptVoucherXml,
   buildSalesVoucherXml,
   parseTallyImportResponse,
+  testTallyErp9Connection,
+  throwTallyStorageError,
   xmlEnvelope,
 } from '@/lib/services/tallyErp9';
 
@@ -12,6 +24,52 @@ describe('Tally ERP 9 XML helpers', () => {
     const xml = xmlEnvelope('Import', 'All Masters', 'A & B', '<TALLYMESSAGE><LEDGER NAME="X &amp; Y"/></TALLYMESSAGE>');
     expect(xml).toContain('<TALLYREQUEST>Import Data</TALLYREQUEST>');
     expect(xml).toContain('<SVCURRENTCOMPANY>A &amp; B</SVCURRENTCOMPANY>');
+  });
+
+  describe('Tally ERP 9 connection status', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('confirms only a recent successful Windows-agent heartbeat', async () => {
+      tallyDb.query.integrations.findFirst.mockResolvedValue({
+        isActive: true,
+        config: { agentToken: 'x'.repeat(32), companyName: 'Tech Shilpi' },
+      });
+      tallyDb.query.integrationSyncRecords.findFirst.mockResolvedValue({
+        status: 'SYNCED',
+        updatedAt: new Date(),
+        responsePayload: { tallyConnected: true, release: '6.6' },
+      });
+
+      await expect(testTallyErp9Connection()).resolves.toEqual({
+        ok: true,
+        detail: 'Windows agent connected to Tally ERP 9 (6.6)',
+      });
+    });
+
+    it('does not report an offline or stale agent as connected', async () => {
+      tallyDb.query.integrations.findFirst.mockResolvedValue({
+        isActive: true,
+        config: { agentToken: 'x'.repeat(32), companyName: 'Tech Shilpi' },
+      });
+      tallyDb.query.integrationSyncRecords.findFirst.mockResolvedValue({
+        status: 'SYNCED',
+        updatedAt: new Date(Date.now() - 121_000),
+        responsePayload: { tallyConnected: true },
+      });
+
+      await expect(testTallyErp9Connection()).resolves.toMatchObject({ ok: false });
+    });
+
+    it('surfaces a missing integration migration and does not mask unrelated database errors', () => {
+      expect(() => throwTallyStorageError({ code: '42P01' })).toThrow(
+        'Apply migration 0011_tally_external_integration',
+      );
+      expect(() => throwTallyStorageError(new Error('database unavailable'))).toThrow(
+        'database unavailable',
+      );
+    });
   });
 
   it('builds party ledger XML from CRM customer fields', () => {
