@@ -1,0 +1,288 @@
+REAL ESTATE SALES CRM - FEATURE LIST
+Verified by reading the source and the live database on 2026-09-30.
+Loans is deliberately not a feature: its code, tables and migration history are
+removed, and no document or script below references it.
+Scale: 40 database tables, 73 API routes, 34 pages, 29 service modules, 443 tests.
+
+===============================================================================
+1. AUTH, ROLES & ACCESS CONTROL
+===============================================================================
+- Scrypt-hashed passwords (src/lib/password.ts), never stored plaintext
+- Opaque session tokens stored in the `sessions` table; `sp_session` cookie
+- Sliding session TTL, SESSION_TTL_DAYS configurable
+- 8 roles: SUPER_ADMIN, ADMIN, SALES_MANAGER, TEAM_LEADER, SALES_EXECUTIVE,
+  DOCUMENT_MANAGER, ACCOUNTS, VIEW_ONLY
+- Granular permission matrix (26+ named permissions), e.g.
+  targets.view / targets.manage / collections.view / collections.manage /
+  receipts.issue / payments.record
+- Signup, login, logout, current-user endpoint
+- Bootstrap super-admin CLI (npm run db:ensure-admin)
+- Auth demo mode escape hatch (development only, guarded by AUTH_DEMO_MODE)
+- Password policy module (src/lib/password-policy.ts)
+- Edge middleware guard: presence-only cookie check, no DB access
+- Settings readiness check endpoint
+
+===============================================================================
+2. LEADS
+===============================================================================
+- 17-stage pipeline: NEW, CONTACT_PENDING, CONTACTED, QUALIFIED, FOLLOW_UP,
+  MEETING, SITE_VISIT_1/2/3, NEGOTIATION, BOOKING, DOCUMENT_COLLECTION,
+  NOT_INTERESTED, CALL_BACK_LATER, WRONG_NUMBER, DUPLICATE, DEAL_COMPLETED,
+  LOST, CANCELLED
+- Validated status machine: legal transitions only, with terminal-status
+  protection and a role-gated reopen path for admins
+- Lead sources, priorities, property types, budget, preferred location, notes
+- Full activity timeline per lead (ACTIVITY_TYPES)
+- Status history table - every transition recorded
+- Assignment to a salesperson, with reassignment audit
+- Scoped visibility: a sales executive sees only their own plus unassigned
+- Lead operations view (src/lib/services/leadOperations.ts)
+- CSV export of leads
+- Duplicate detection with confidence scoring, plus a merge operation that
+  moves activities, notes and documents onto the surviving lead
+
+===============================================================================
+3. INCOMING LEAD WEBHOOKS
+===============================================================================
+- Durable sync layer (src/lib/services/incomingLeadSync.ts)
+- Webhook creates a RECEIVED receipt first, then the lead, in the same request
+- On transient failure the receipt is NOT burned: it stays RECEIVED as the audit
+  trail and an INTEGRATION_SYNC job is enqueued with a digest key
+- Queue retries with bounded exponential backoff, idempotent via the digest
+- Retry endpoint for failed deliveries, and a manual status endpoint
+
+===============================================================================
+4. META (FACEBOOK / INSTAGRAM) ADS INTEGRATION
+===============================================================================
+- Meta Graph API v21.0, server-side only
+- Webhook verification token handshake
+- X-Hub-Signature-256 verification against the app secret
+  (an empty app secret cannot authenticate, so callers must reject)
+- Meta form id -> lead source mapping, so ONE webhook can feed SEVERAL funnels
+- Lead-gen payload parsing, source classification and user resolution
+- Automatic project matching for the incoming lead (projectMatch.ts)
+- Status and connection-test endpoints
+
+===============================================================================
+5. WHATSAPP BUSINESS (CLOUD API)
+===============================================================================
+- Meta Graph v22.0 outbound template messages via phone_number_id
+- Approved-template name + BCP-47 language configuration
+- Runs as a queued job with bounded retries
+- Every outbound message recorded in messageLogs for auditing
+- Credentials stored AES-256-GCM encrypted, never in plain text
+
+===============================================================================
+6. EMAIL
+===============================================================================
+- Two transports (src/lib/resend.ts): Resend HTTP API, or any SMTP mailbox
+- SMTP via nodemailer; port 465 implicit TLS, port 587 STARTTLS
+- Picks whichever backend the operator has configured
+- Optional: with no credentials the app is fully usable, notifications stay
+  in-app
+
+===============================================================================
+7. AI
+===============================================================================
+- Groq-powered per-lead brief: summary, intent score, recommended next action
+- Server-side only, never prefixed NEXT_PUBLIC_, 30s timeout, token budget
+- Strict JSON extraction and coercion (aiBrief.ts) with clamping
+- Fully optional: no key = a "not configured" state, nothing else breaks
+- Conversational assistant over CRM data (assistantConversations /
+  assistantMessages), with a confirm-before-act flow
+  (/api/assistant/confirm) so nothing mutates without a deliberate step
+- Assistant history store with pending-action clearing
+
+===============================================================================
+8. FOLLOW-UPS
+===============================================================================
+- Types: CALL, WHATSAPP, EMAIL, MEETING, SITE_VISIT, OTHER
+- Statuses: scheduled, due, completed, overdue
+- Assigned to a specific user; unassigned follow-ups visible to the team
+- Lead alerts: notify owner of a new lead, broadcast to the team
+- Escalation scan for unclaimed leads (ESCALATION_MINUTES)
+- Reminder engine: follow-up nudges, payment lookahead, digest intervals,
+  timezone-aware visibility
+
+===============================================================================
+9. MEETINGS & SITE VISITS
+===============================================================================
+- Types incl. site visits with visit numbers (visit 1/2/3)
+- Status lifecycle, scheduling, and automatic lead status transitions
+  when a visit is completed
+
+===============================================================================
+10. CUSTOMERS
+===============================================================================
+- Convert a lead into a customer record (deduplicated on leadId)
+- Customer 360 view with a unified timeline (customerHistory.ts)
+- Customer activities log
+- Customer-to-booking history endpoint
+- Owner and source-lead linkage
+
+===============================================================================
+11. PROJECTS, TOWERS & UNITS
+===============================================================================
+- Projects with towers and units
+- Unit types and BHK configurations
+- Unit status lifecycle: AVAILABLE -> HOLD -> BOOKED / SOLD
+- Hold with expiry (holdUntil) and release back to available
+- Availability search with filters (status, project, tower, price range)
+- Bulk listing that skips the tower/unit rollup for read-only callers
+
+===============================================================================
+12. BOOKINGS
+===============================================================================
+- Booking number generation, booking amount, sale value
+- Statuses incl. CANCELLATION_REQUESTED and CANCELLED
+- Cancellation request with reason, approval / rejection workflow
+- Booking detail with related lead, payments, cancellations, documents
+
+===============================================================================
+13. PAYMENTS
+===============================================================================
+- Record payments against a booking; methods incl. cash, cheque, bank
+  transfer, UPI, card, NEFT, RTGS
+- Payment reference / UTR tracking, received-by attribution
+- Payment due dates (paymentDue table)
+
+===============================================================================
+14. COLLECTIONS
+===============================================================================
+- Instalment plan per booking (paymentMilestones): name, due date,
+  percentage or amount, notes
+- Milestone status derivation: Pending, Partial, Paid, Waived
+  - Float-safe settlement so sub-paise drift never looks partial
+  - A waived milestone is never silently un-waived
+- Payment allocation: oldest-due-first by default, or pinned to one milestone
+- Unallocated tracking (money received with no milestone to sit against)
+- RECEIPTS
+  - Auto-issued on every payment, idempotent (no double numbering)
+  - Sequential numbers via a counters table (RCPT prefix)
+  - Printable receipt page with print / Save-as-PDF, amount in words in
+    Indian format (crore / lakh / thousand)
+  - Voiding with a mandatory recorded reason; a void is a paperwork event,
+    not a refund
+- Ageing report: outstanding, overdue, and buckets
+  (Not due / 1-30 / 31-60 / 61-90 / 90+ days) with per-installment chase list
+- Per-salesperson collection achievement
+
+===============================================================================
+15. TARGETS & FORECASTING
+===============================================================================
+- Monthly targets per salesperson (salesTargets table, unique per
+  person/period/all-scope), bulk assignment
+- Metrics: booking value, collection, lead count, booking count
+- Achievement: attainment %, remaining gap, capped progress bar; "not set" is
+  distinguished from 0%
+- Pipeline forecast from an explicit, auditable per-stage probability table
+- Weighted expected value vs. unweighted pipeline value
+- Stale-lead discount (14-day silence window, 50% discount) so the forecast
+  does not reward hoarding
+- Focus queue: cold deals first, biggest prize within each group
+
+===============================================================================
+16. COMMISSIONS
+===============================================================================
+- Slab-based commission calculation by project / role
+- Commission rules with versioning (snapshots) so history is not rewritten
+- Commission ledger plus manual adjustments
+- Automatic reversal when a booking is cancelled
+- Per-person commission summary and a manager dashboard
+
+===============================================================================
+17. PAYOUTS
+===============================================================================
+- Payout batches with lifecycle: create -> process -> finalize
+- Batch transactions and per-transaction reversal
+- Payout dashboard
+
+===============================================================================
+18. DOCUMENTS
+===============================================================================
+- Upload with MIME allowlist and a 25 MB size cap
+- Backends: Cloudflare R2 (S3-compatible, signed URLs) or a local disk
+  fallback served through an authenticated proxy route
+- Document types and a verification workflow (pending -> verified/rejected)
+- SHA-256 content hashing
+- Key sanitisation to block path traversal
+- R2 keys and documents are optional and degrade gracefully
+
+===============================================================================
+19. AUTOMATION & BACKGROUND JOBS
+===============================================================================
+- Automation rules on 5 triggers: LEAD_CREATED, VISIT_COMPLETED,
+  BOOKING_COMPLETED, FOLLOWUP_DONE, DOCUMENT_VERIFIED
+  - Actions include creating follow-ups, document checklists, team
+    notifications and assignment
+- DB-backed job queue with bounded retries, attempts tracking and last-error
+  capture
+- Cron endpoint /api/internal/process-queue, protected by CRON_SECRET and
+  failing closed; scheduled via vercel.json every 5 minutes
+- Opportunistic in-request processing so the app still works without a cron
+
+===============================================================================
+20. NOTIFICATIONS & ALERTS
+===============================================================================
+- In-app notification centre with unread counts and mark-as-read
+- Queue-driven reminders: follow-up nudges, payment lookahead, digests
+- New-lead owner notification and team broadcast
+- Unclaimed-lead escalation scan
+
+===============================================================================
+21. REPORTING & ANALYTICS
+===============================================================================
+- Dashboard with trend series
+- Sales report and cancellation report
+- Target achievement and receivables ageing
+- Commission and payout dashboards
+
+===============================================================================
+22. SEARCH
+===============================================================================
+- Global search across the CRM
+- Dedicated unit availability search
+
+===============================================================================
+23. EASY MODE  (mobile-first simplified UI)
+===============================================================================
+- A stripped-down interface for the field: /easy/home, /easy/today,
+  /easy/my-leads, /easy/new-lead, /easy/new-payment
+- Big-touch targets and one-action-per-screen flows
+- Quick payment entry reuses the real collections allocation engine, so money
+  recorded here lands on the correct instalment
+- Automatic per-user scoping: a sales executive sees only their own leads,
+  customers and follow-ups
+
+===============================================================================
+24. PLATFORM / CROSS-CUTTING
+===============================================================================
+- Full audit log on every create, update, delete and void
+- Global search
+- Encrypted credential store (AES-256-GCM) for integration secrets
+- Outbound message log for WhatsApp/email auditing
+- Outbound message log browser + CSV export
+- Health endpoint
+- TypeScript strict, ESLint clean, 443 tests passing
+- Drizzle migrations with journal sanity assertions (guards against
+  future-dated or out-of-order migration timestamps)
+
+===============================================================================
+25. SCHEMA-ONLY / NOT WIRED
+===============================================================================
+- `expenses` table exists in the schema and seed data, but no API route or
+  service reads or writes it. There is no expense feature yet.
+- `incomingLeads` and `integrations` tables back the webhook and credential
+  features respectively.
+
+===============================================================================
+26. DEPLOYMENT READINESS (Vercel)
+===============================================================================
+- vercel.json: nextjs framework, cron every 5 minutes
+- Node pinned to 22.x via engines
+- No native dependencies; no hardcoded localhost
+- Edge middleware touches neither the DB nor node:crypto
+- DB pool defaults to 2 on serverless, 20 otherwise, overridable via
+  DB_POOL_MAX
+- Required production env vars are documented in .env.example, including
+  CRON_SECRET and SETTINGS_ENCRYPTION_KEY

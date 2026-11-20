@@ -1,0 +1,24 @@
+# --- dependency locks ---
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- env / secrets (never commit real values) ---
+# `.env*` rather than just `.env`, so strays like `.env.tmp` / `.env.production`
+# are ignored too; only the documented template is allowed back in.
+.env*
+!.env.example
+
+# --- misc ---
+.DS_Store
+*.log
+coverage/
+.vitest/
+.vercel/
+
+# NOTE: `drizzle/` is deliberately NOT ignored. The migration .sql files and
+# meta/_journal.json are read from disk at runtime by src/lib/db/migrate.ts,
+# so they must ship with the repo or a fresh clone / CI job cannot migrate.
